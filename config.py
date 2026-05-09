@@ -1,22 +1,15 @@
 import os
 
-# --- KONFIGURASI DATABASE ---
-# Menggunakan os.getenv:
-# Jika ada settingan dari Docker (Environment Variable), pakai itu.
-# Jika tidak ada (Localhost), pakai default value di parameter kedua.
-
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'user': os.getenv('DB_USER', 'root'),
-    'password': os.getenv('DB_PASSWORD', ''), # Kosong jika di XAMPP, tapi di Docker nanti kita set
-    'database': os.getenv('DB_NAME', 'rutan_db')
+    'host': os.getenv('DB_HOST') or os.getenv('MYSQLHOST', 'localhost'),
+    'user': os.getenv('DB_USER') or os.getenv('MYSQLUSER', 'root'),
+    'password': os.getenv('DB_PASSWORD') or os.getenv('MYSQLPASSWORD', ''),
+    'database': os.getenv('DB_NAME') or os.getenv('MYSQLDATABASE', 'rutan_db'),
+    'port': int(os.getenv('DB_PORT') or os.getenv('MYSQLPORT', 3306)),
 }
 
-# --- KONFIGURASI APLIKASI ---
 SECRET_KEY = os.getenv('SECRET_KEY', 'kunci_rahasia_rutan_makassar')
-RECOVERY_CODE = 'rutan_pangkalan_brandan'
+UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'static/uploads')
 
-# --- KONFIGURASI UPLOAD ---
-UPLOAD_FOLDER = 'static/uploads'
 IMG_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 DOC_EXTENSIONS = {'pdf'}
