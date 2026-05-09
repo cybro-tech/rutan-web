@@ -1,15 +1,15 @@
 import os
 
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST'),
-    'port': os.getenv('DB_PORT'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASSWORD'),
-    'database': os.getenv('DB_NAME')
+    'host': os.environ.get('MYSQLHOST'),
+    'user': os.environ.get('MYSQLUSER'),
+    'password': os.environ.get('MYSQLPASSWORD'),
+    'database': os.environ.get('MYSQLDATABASE'),
+    'port': int(os.environ.get('MYSQLPORT', 3306)),
 }
 
-SECRET_KEY = os.getenv('SECRET_KEY', 'kunci_rahasia_rutan_makassar')
-UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'static/uploads')
+SECRET_KEY = os.environ.get('SECRET_KEY', 'rutan_secret')
+UPLOAD_FOLDER = 'static/uploads'
 
 IMG_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 DOC_EXTENSIONS = {'pdf'}
