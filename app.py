@@ -4,21 +4,50 @@ import os
 import pandas as pd
 import io
 import random
-import string
-from PIL import Image, ImageDraw, ImageFont
+import requests
 from werkzeug.utils import secure_filename
 from datetime import datetime
 
 import config
 
-print("DB CONFIG:", config.DB_CONFIG)
-
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
 app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
 
+# Token Fonnte kamu
+FONNTE_TOKEN = "BX76CF2HTJewnZpSsxei"
+
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
+
+# ==========================================
+# 1. FUNGSI BANTUAN (DATABASE & FILE)
+# ==========================================
+
+def get_db():
+    """Membuat koneksi ke database MySQL."""
+    return mysql.connector.connect(**config.DB_CONFIG)
+
+def allowed_file(filename, allowed_types):
+    """Cek apakah ekstensi file diperbolehkan."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_types
+
+def format_whatsapp_number(phone):
+    """
+    Format nomor HP agar kompatibel dengan API WhatsApp (62...).
+    Menghapus spasi, strip, dan mengubah 0 di depan menjadi 62.
+    """
+    if not phone:
+        return ""
+    
+    # Hapus karakter non-digit (spasi, strip, plus, dll)
+    phone = ''.join(filter(str.isdigit, str(phone)))
+    
+    # Jika diawali '0', ganti dengan '62'
+    if phone.startswith('0'):
+        phone = '62' + phone[1:]
+    
+    return phone
 
 # ==========================================
 # 1. FUNGSI BANTUAN
@@ -27,9 +56,6 @@ if not os.path.exists(app.config['UPLOAD_FOLDER']):
 def get_db():
     return mysql.connector.connect(**config.DB_CONFIG)
 
-def allowed_file(filename, allowed_types):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_types
-
 def format_whatsapp_number(phone):
     if not phone: return ""
     phone = ''.join(filter(str.isdigit, str(phone)))
@@ -37,53 +63,49 @@ def format_whatsapp_number(phone):
         phone = '62' + phone[1:]
     return phone
 
-# --- FITUR BARU: GENERATOR CAPTCHA ---
-@app.route('/captcha')
-def generate_captcha():
-    # Buat kombinasi 5 karakter (Huruf & Angka)
-    chars = string.ascii_uppercase + string.digits
-    captcha_text = ''.join(random.choice(chars) for _ in range(5))
-    session['captcha_text'] = captcha_text
-
-    # Setting Gambar
-    width, height = 120, 50
-    image = Image.new('RGB', (width, height), color=(245, 245, 245))
-    draw = ImageDraw.Draw(image)
+def send_whatsapp_otp(target_phone, otp_code):
+    url = "https://api.fonnte.com/send"
+    message = f"SECURITY ALERT: Kode OTP Admin Anda adalah *{otp_code}*.\n\nKode ini berlaku selama 5 menit. Jangan berikan kode ini kepada siapapun untuk menjaga keamanan sistem Rutan Pangkalan Brandan."
     
-    # Tambahkan gangguan (noise) berupa garis
-    for _ in range(5):
-        draw.line([(random.randint(0, width), random.randint(0, height)), 
-                   (random.randint(0, width), random.randint(0, height))], 
-                  fill=(200, 200, 200), width=1)
-
-    # Tulis Teks (Gunakan font default jika tidak ada file font eksternal)
-    # Jika ingin font lebih bagus, masukkan path file .ttf di ImageFont.truetype()
-    draw.text((20, 10), captcha_text, fill=(26, 35, 126))
-
-    # Simpan ke memori buffer
-    buf = io.BytesIO()
-    image.save(buf, 'PNG')
-    buf.seek(0)
-    return send_file(buf, mimetype='image/png')
+    payload = {
+        'target': format_whatsapp_number(target_phone),
+        'message': message,
+        'countryCode': '62',
+    }
+    headers = {'Authorization': FONNTE_TOKEN}
+    
+    try:
+        response = requests.post(url, data=payload, headers=headers)
+        return response.json()
+    except Exception as e:
+        print(f"Error Fonnte: {e}")
+        return False
 
 # ==========================================
-# 2. ROUTES PUBLIK
+# 2. ROUTES PUBLIK (USER INTERFACE)
 # ==========================================
 
 @app.route('/')
 def index():
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
+    
+    # Ambil data Slider
     cursor.execute("SELECT * FROM sliders")
     sliders = cursor.fetchall()
+    
+    # Ambil 3 Berita Terbaru
     cursor.execute("SELECT * FROM news ORDER BY created_at DESC LIMIT 3")
     news = cursor.fetchall()
+    
+    # Ambil Statistik WBP
     try:
         cursor.execute("SELECT count FROM wbp_stats WHERE id = 1")
         wbp_data = cursor.fetchone()
         wbp_count = wbp_data['count'] if wbp_data else 0
     except:
         wbp_count = 0
+        
     conn.close()
     return render_template('index.html', sliders=sliders, news=news, wbp_count=wbp_count)
 
@@ -98,8 +120,11 @@ def profil():
     conn.close()
     return render_template('profil.html', main=main_profile, points=points)
 
+# --- ROUTES LAYANAN (Integrasi, Litmas, Bebas) ---
+
 @app.route('/layanan/integrasi')
 def layanan_integrasi():
+    # Ambil data layanan untuk ditampilkan di bagian bawah (jika ada template download)
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT * FROM services")
@@ -107,23 +132,30 @@ def layanan_integrasi():
     conn.close()
     return render_template('layanan_integrasi.html', services=services)
 
+# FITUR BARU: PROSES UPLOAD SURAT JAMINAN
 @app.route('/layanan/upload_surat', methods=['POST'])
 def upload_surat_jaminan():
     nama = request.form['nama']
     nik = request.form['nik']
     no_wa_raw = request.form['no_wa']
+    
+    # Format nomor WA
     no_wa = format_whatsapp_number(no_wa_raw)
     
+    # Cek File
     if 'file_surat' not in request.files:
         flash('Tidak ada file yang diunggah', 'danger')
         return redirect(url_for('layanan_integrasi'))
     
     file = request.files['file_surat']
+    
     if file.filename == '':
         flash('Tidak ada file yang dipilih', 'danger')
         return redirect(url_for('layanan_integrasi'))
 
+    # Gabungkan ekstensi gambar dan dokumen untuk validasi
     ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf', 'doc', 'docx'}
+    
     if file and allowed_file(file.filename, ALLOWED_EXTENSIONS):
         filename = secure_filename(datetime.now().strftime("%Y%m%d%H%M%S") + "_SURAT_" + file.filename)
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
@@ -144,6 +176,7 @@ def upload_surat_jaminan():
             conn.close()
     else:
         flash('Format file tidak didukung. Harap upload PDF, DOC, atau Gambar.', 'danger')
+        
     return redirect(url_for('layanan_integrasi'))
 
 @app.route('/layanan/litmas')
@@ -190,9 +223,12 @@ def download_bebas():
     output.seek(0)
     return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f'Data_WBP_Bebas_{datetime.now().strftime("%Y%m%d")}.xlsx')
 
+# --- ROUTES FITUR BARU: KUNJUNGAN ONLINE ---
+
 @app.route('/layanan/kunjungan', methods=['GET', 'POST'])
 def layanan_kunjungan():
     if request.method == 'POST':
+        # Ambil data input form
         nama = request.form['nama']
         alamat = request.form['alamat']
         no_wa_raw = request.form['no_wa']
@@ -200,15 +236,20 @@ def layanan_kunjungan():
         jk = request.form['jenis_kelamin']
         nama_wbp = request.form['nama_wbp']
         perkara = request.form['perkara']
+        
+        # Format Nomor WA
         no_wa = format_whatsapp_number(no_wa_raw)
+        
         conn = get_db()
         cursor = conn.cursor()
         try:
+            # Query INSERT
             cursor.execute("""
                 INSERT INTO kunjungan_online 
                 (nama_pengunjung, alamat, no_wa, umur, jenis_kelamin, nama_wbp, perkara) 
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (nama, alamat, no_wa, umur, jk, nama_wbp, perkara))
+            
             conn.commit()
             flash('Pendaftaran Kunjungan Berhasil! Data telah masuk ke sistem kami.', 'success')
         except Exception as e:
@@ -217,7 +258,10 @@ def layanan_kunjungan():
         finally:
             conn.close()
         return redirect(url_for('layanan_kunjungan'))
+        
     return render_template('layanan_kunjungan.html')
+
+# --- ROUTES FITUR BARU: PENGADUAN & INFORMASI ONLINE ---
 
 @app.route('/layanan/informasi', methods=['GET', 'POST'])
 def layanan_informasi():
@@ -229,7 +273,9 @@ def layanan_informasi():
         no_wa_raw = request.form['no_wa']
         deskripsi = request.form['deskripsi']
         jenis = 'Informasi'
+        
         no_wa = format_whatsapp_number(no_wa_raw)
+        
         conn = get_db()
         cursor = conn.cursor()
         try:
@@ -238,6 +284,7 @@ def layanan_informasi():
                 (jenis_layanan, nama_pelapor, nik, jenis_kelamin, alamat, no_wa, deskripsi) 
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (jenis, nama, nik, jk, alamat, no_wa, deskripsi))
+            
             conn.commit()
             flash('Permintaan Informasi terkirim! Petugas kami akan menghubungi via WhatsApp.', 'success')
         except Exception as e:
@@ -245,6 +292,7 @@ def layanan_informasi():
         finally:
             conn.close()
         return redirect(url_for('layanan_informasi'))
+    
     return render_template('layanan_pengaduan_form.html', page_title="Layanan Informasi Online", form_action=url_for('layanan_informasi'))
 
 @app.route('/layanan/pengaduan', methods=['GET', 'POST'])
@@ -257,7 +305,9 @@ def layanan_pengaduan_user():
         no_wa_raw = request.form['no_wa']
         deskripsi = request.form['deskripsi']
         jenis = 'Pengaduan'
+        
         no_wa = format_whatsapp_number(no_wa_raw)
+        
         conn = get_db()
         cursor = conn.cursor()
         try:
@@ -266,6 +316,7 @@ def layanan_pengaduan_user():
                 (jenis_layanan, nama_pelapor, nik, jenis_kelamin, alamat, no_wa, deskripsi) 
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (jenis, nama, nik, jk, alamat, no_wa, deskripsi))
+            
             conn.commit()
             flash('Pengaduan Anda telah kami terima dan akan segera diproses.', 'success')
         except Exception as e:
@@ -273,6 +324,7 @@ def layanan_pengaduan_user():
         finally:
             conn.close()
         return redirect(url_for('layanan_pengaduan_user'))
+
     return render_template('layanan_pengaduan_form.html', page_title="Formulir Pengaduan Masyarakat", form_action=url_for('layanan_pengaduan_user'))
 
 @app.route('/layanan')
@@ -283,6 +335,8 @@ def layanan():
     services = cursor.fetchall()
     conn.close()
     return render_template('layanan.html', services=services)
+
+# --- ROUTES BERITA, KONTAK, GALERI ---
 
 @app.route('/berita')
 def berita():
@@ -338,7 +392,7 @@ def galeri():
     return render_template('galeri.html', photos=photos)
 
 # ==========================================
-# 3. ROUTES ADMIN (DASHBOARD & LOGIN)
+# 3. ROUTES ADMIN (DASHBOARD & MANAGEMENT)
 # ==========================================
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -346,14 +400,7 @@ def login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        user_captcha = request.form['captcha'].upper() # Ambil input captcha
         
-        # 1. Validasi Captcha
-        if user_captcha != session.get('captcha_text'):
-            flash('Kode CAPTCHA salah! Silakan coba lagi.', 'danger')
-            return redirect(url_for('login'))
-
-        # 2. Validasi Akun
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM users WHERE username=%s AND password=%s", (username, password))
@@ -361,15 +408,18 @@ def login():
         conn.close()
         
         if user:
+            # LANGSUNG SET SESSION (Melewati OTP)
             session['user'] = user['username']
             session['user_image'] = user.get('image')
-            session.pop('captcha_text', None) # Hapus captcha dari session setelah sukses
+            
             flash(f"Login Berhasil! Selamat Datang, {session['user']}", 'success')
             return redirect(url_for('admin_dashboard'))
         else:
             flash('Username atau Password salah.', 'danger')
             
     return render_template('login.html')
+
+
 
 @app.route('/logout')
 def logout():
@@ -407,6 +457,8 @@ def admin_dashboard():
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
     stats = {}
+    
+    # Hitung data dari tabel-tabel utama
     tables = ['news', 'messages', 'services', 'gallery', 'profiles', 'users', 'kunjungan_online', 'pengaduan_online', 'surat_jaminan']
     for t in tables:
         try:
@@ -414,12 +466,15 @@ def admin_dashboard():
             stats[t] = cursor.fetchone()['count']
         except:
             stats[t] = 0
+            
+    # Statistik Khusus WBP
     try:
         cursor.execute("SELECT count FROM wbp_stats WHERE id=1")
         wbp = cursor.fetchone()
         stats['wbp'] = wbp['count'] if wbp else 0
     except:
         stats['wbp'] = 0
+        
     conn.close()
     return render_template('admin/dashboard.html', stats=stats)
 
@@ -435,12 +490,14 @@ def admin_wbp():
         flash('Jumlah WBP berhasil diperbarui!', 'success')
         conn.close()
         return redirect(url_for('admin_wbp'))
+    
     cursor.execute("SELECT count FROM wbp_stats WHERE id=1")
     data = cursor.fetchone()
     current_count = data['count'] if data else 0
     conn.close()
     return render_template('admin/kelola_wbp.html', current_count=current_count)
 
+# --- ADMIN: KELOLA KUNJUNGAN ONLINE ---
 @app.route('/admin/kunjungan')
 def admin_kunjungan():
     if 'user' not in session: return redirect(url_for('login'))
@@ -454,13 +511,16 @@ def admin_kunjungan():
 @app.route('/admin/kunjungan/update', methods=['POST'])
 def admin_kunjungan_update():
     if 'user' not in session: return redirect(url_for('login'))
+    
     id_kunjungan = request.form['id']
     status_baru = request.form['status']
+    
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE kunjungan_online SET status=%s WHERE id=%s", (status_baru, id_kunjungan))
     conn.commit()
     conn.close()
+    
     flash('Status kunjungan berhasil diperbarui!', 'success')
     return redirect(url_for('admin_kunjungan'))
 
@@ -479,6 +539,7 @@ def admin_kunjungan_delete(id):
         conn.close()
     return redirect(url_for('admin_kunjungan'))
 
+# --- ADMIN: KELOLA PENGADUAN & INFO ---
 @app.route('/admin/pengaduan')
 def admin_pengaduan():
     if 'user' not in session: return redirect(url_for('login'))
@@ -504,6 +565,8 @@ def admin_pengaduan_delete(id):
         conn.close()
     return redirect(url_for('admin_pengaduan'))
 
+# --- ADMIN: FITUR BARU - KELOLA SURAT JAMINAN ---
+
 @app.route('/admin/surat_jaminan')
 def admin_surat_jaminan():
     if 'user' not in session: return redirect(url_for('login'))
@@ -518,29 +581,61 @@ def admin_surat_jaminan():
 def admin_surat_status():
     if 'user' not in session: return redirect(url_for('login'))
     id_surat = request.form['id']
+    
+    # Update status menjadi 'Dibalas' saat tombol kirim WA ditekan (via AJAX atau form ini)
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE surat_jaminan SET status='Dibalas' WHERE id=%s", (id_surat,))
     conn.commit()
     conn.close()
-    return "OK", 200
+    return "OK", 200 # Digunakan untuk AJAX call
 
 @app.route('/admin/surat_jaminan/delete/<int:id>')
 def admin_surat_delete(id):
     if 'user' not in session: return redirect(url_for('login'))
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
+    
+    # Ambil info file untuk dihapus dari folder
     cursor.execute("SELECT file_surat FROM surat_jaminan WHERE id=%s", (id,))
     data = cursor.fetchone()
     if data and data['file_surat']:
-        try: os.remove(os.path.join(app.config['UPLOAD_FOLDER'], data['file_surat']))
-        except: pass
+        try:
+            os.remove(os.path.join(app.config['UPLOAD_FOLDER'], data['file_surat']))
+        except:
+            pass
+            
     cursor.execute("DELETE FROM surat_jaminan WHERE id=%s", (id,))
     conn.commit()
     conn.close()
     flash('Data surat jaminan berhasil dihapus.', 'success')
     return redirect(url_for('admin_surat_jaminan'))
 
+# --- ADMIN: DOWNLOAD TEMPLATE ---
+@app.route('/download/template/litmas')
+def template_litmas():
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_title = pd.DataFrame(["PENGUMUMAN DAFTAR NAMA YANG BISA USUL LITMAS"])
+        df_title.to_excel(writer, index=False, header=False, startrow=0, startcol=0, sheet_name='Template Litmas')
+        df = pd.DataFrame(columns=['No', 'Nama', 'Lama Pidana (tahun)', 'Lama Pidana (bulan)', 'Besaran Denda', 'Subs Bulan'])
+        df.to_excel(writer, index=False, startrow=2, sheet_name='Template Litmas')
+    output.seek(0)
+    return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='Template_Upload_Litmas.xlsx')
+
+@app.route('/download/template/bebas')
+def template_bebas():
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_title = pd.DataFrame(["DAFTAR NAMA WBP YANG AKAN BEBAS"])
+        df_title.to_excel(writer, index=False, header=False, startrow=0, startcol=0, sheet_name='Template Bebas')
+        df = pd.DataFrame(columns=['No', 'Nama', 'Tgl Ekspirasi', 'Keterangan'])
+        df.loc[0] = [1, 'CONTOH NAMA', '01/01/2026', 'BEBAS BIASA']
+        df.to_excel(writer, index=False, startrow=2, sheet_name='Template Bebas')
+    output.seek(0)
+    return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='Template_Upload_Bebas.xlsx')
+
+# --- ADMIN: KELOLA LITMAS ---
 @app.route('/admin/litmas', methods=['GET'])
 def admin_litmas():
     if 'user' not in session: return redirect(url_for('login'))
@@ -557,6 +652,7 @@ def admin_litmas_add():
     if 'file' not in request.files: return redirect(url_for('admin_litmas'))
     file = request.files['file']
     if file.filename == '': return redirect(url_for('admin_litmas'))
+
     if file and (file.filename.endswith('.xlsx') or file.filename.endswith('.xls')):
         try:
             df = pd.read_excel(file, header=2)
@@ -601,6 +697,7 @@ def admin_litmas_delete(id):
     conn.close()
     return redirect(url_for('admin_litmas'))
 
+# --- ADMIN: KELOLA BEBAS ---
 @app.route('/admin/bebas', methods=['GET'])
 def admin_bebas():
     if 'user' not in session: return redirect(url_for('login'))
@@ -617,6 +714,7 @@ def admin_bebas_add():
     if 'file' not in request.files: return redirect(url_for('admin_bebas'))
     file = request.files['file']
     if file.filename == '': return redirect(url_for('admin_bebas'))
+
     if file and (file.filename.endswith('.xlsx') or file.filename.endswith('.xls')):
         try:
             df = pd.read_excel(file, header=2)
@@ -663,6 +761,7 @@ def admin_bebas_delete(id):
     conn.close()
     return redirect(url_for('admin_bebas'))
 
+# --- ADMIN: KELOLA USERS ---
 @app.route('/admin/users')
 def admin_users():
     if 'user' not in session: return redirect(url_for('login'))
@@ -747,6 +846,7 @@ def admin_users_delete(id):
     conn.close()
     return redirect(url_for('admin_users'))
 
+# --- ADMIN: KELOLA KONTEN GENERIC (BERITA, GALERI, PROFIL, DLL) ---
 @app.route('/admin/<category>', methods=['GET'])
 def admin_list(category):
     if 'user' not in session: return redirect(url_for('login'))
@@ -779,9 +879,11 @@ def admin_add(category):
             if file and allowed_file(file.filename, config.IMG_EXTENSIONS):
                 filename = secure_filename(datetime.now().strftime("%Y%m%d%H%M%S") + "_" + file.filename)
                 file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+    
     if category == 'berita':
+        # UPDATE DISINI: Menambahkan kolom category ke query INSERT
         content = f"<strong>{request.form.get('city')}</strong> — {request.form['content']}" if request.form.get('city') else request.form['content']
-        category_val = request.form.get('category', 'Kegiatan Rutan')
+        category_val = request.form.get('category', 'Kegiatan Rutan') # Default value
         cursor.execute("INSERT INTO news (title, category, content, author, image) VALUES (%s, %s, %s, %s, %s)", 
                        (request.form['title'], category_val, content, request.form['author'], filename))
     elif category == 'layanan':
@@ -807,6 +909,7 @@ def admin_update(category):
     table = table_map.get(category)
     cursor.execute(f"SELECT * FROM {table} WHERE id=%s", (data_id,))
     old_data = cursor.fetchone()
+    
     filename = old_data.get('file' if category == 'layanan' else 'image')
     if 'image' in request.files:
         file = request.files['image']
@@ -817,7 +920,9 @@ def admin_update(category):
                 except: pass
             filename = secure_filename(datetime.now().strftime("%Y%m%d%H%M%S") + "_" + file.filename)
             file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+
     if category == 'berita':
+        # UPDATE DISINI: Menambahkan kolom category ke query UPDATE
         category_val = request.form.get('category', 'Kegiatan Rutan')
         cursor.execute("UPDATE news SET title=%s, category=%s, content=%s, author=%s, image=%s WHERE id=%s", 
                        (request.form['title'], category_val, request.form['content'], request.form['author'], filename, data_id))
@@ -851,6 +956,24 @@ def admin_delete(category, id):
     conn.commit()
     conn.close()
     return redirect(url_for('admin_list', category=category))
+
+# Tambahkan ini di app.py sebelum bagian routes atau sebelum app.run()
+
+@app.context_processor
+def inject_unread_count():
+    """Menyediakan jumlah pesan masuk ke semua template secara otomatis."""
+    if 'user' in session:
+        try:
+            conn = get_db()
+            cursor = conn.cursor(dictionary=True)
+            # Menghitung total pesan di tabel messages
+            cursor.execute("SELECT COUNT(*) as count FROM messages")
+            count = cursor.fetchone()['count']
+            conn.close()
+            return dict(unread_messages_count=count)
+        except:
+            return dict(unread_messages_count=0)
+    return dict(unread_messages_count=0)
 
 if __name__ == '__main__':
     app.run(debug=True)
