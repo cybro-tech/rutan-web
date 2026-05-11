@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, send_file
+from flask import Flask, render_template, request, redirect, url_for, session, flash, send_file, send_from_directory
 import mysql.connector
 import os
 import pandas as pd
@@ -975,6 +975,10 @@ def inject_unread_count():
         except:
             return dict(unread_messages_count=0)
     return dict(unread_messages_count=0)
+
+@app.route('/sitemap.xml')def static_from_root():
+    return send_from_directory(os.path.join(app.root_path, 'static'),
+                               'sitemap.xml')
 
 if __name__ == '__main__':
     app.run(debug=True)
