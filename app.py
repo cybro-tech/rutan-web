@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, send_file, 
+from flask import Flask, render_template, request, redirect, url_for, session, flash, send_file
 import mysql.connector
 import os
 import pandas as pd
